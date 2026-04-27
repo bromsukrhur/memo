@@ -499,7 +499,8 @@
 <script>
 const CLIENT_ID = '1095156514207-d8c88k6indsb94lkpbd5amq70klcd4fp.apps.googleusercontent.com';
 let DOC_ID = localStorage.getItem('memo_doc_id') || '';
-const SCOPES = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive';
+const SCOPES = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets';
+let SHEET_ID = localStorage.getItem('memo_sheet_id') || '';
 
 let selectedDots = [];
 let isDrawing = false;
@@ -670,7 +671,7 @@ function saveMemo() {
   const obj = { date: key, raw: val, organized: memos[idx]?.organized || null, updatedAt: Date.now() };
   if (idx >= 0) memos[idx] = obj; else memos.unshift(obj);
   localStorage.setItem('memo_data', JSON.stringify(memos));
-  if (gAccessToken) saveTodayToDocs(val, obj.organized);
+  if (gAccessToken) saveToSheets(key, val);
   showStatus('저장됨 ✓');
 }
 
@@ -723,7 +724,7 @@ async function aiOrganize() {
     if (idx >= 0) {
       memos[idx].organized = organized;
       localStorage.setItem('memo_data', JSON.stringify(memos));
-      if (gAccessToken) syncToDocs(memos[idx]);
+      // 수동 AI 정리는 로컬만 저장, Docs는 자정에 최종 저장
     }
   } catch (e) {
     textEl.innerHTML = `<span style="color:var(--danger)">오류: ${e.message}</span>`;
@@ -818,27 +819,111 @@ function updateAuthStatus(ok) {
     if (DOC_ID) {
       document.getElementById('docStatus').textContent = `✓ 연결된 문서 ID: ${DOC_ID.slice(0,20)}...`;
     }
-    // Docs에서 오늘 메모 불러오기
-    syncLoadFromDocs();
+    // Sheets에서 오늘 메모 불러오기
+    syncLoadFromSheets();
   }
 }
 
-async function syncLoadFromDocs() {
-  showStatus('⟳ 동기화 중...');
-  const todayRaw = await loadTodayFromDocs();
-  if (todayRaw) {
-    const today = getTodayKey();
-    const idx = memos.findIndex(m => m.date === today);
-    if (idx >= 0) {
-      // Docs 내용이 더 최신이면 덮어쓰기
-      memos[idx].raw = todayRaw;
-    } else {
-      memos.unshift({ date: today, raw: todayRaw, organized: null, updatedAt: Date.now() });
+// ─── GOOGLE SHEETS 동기화 (평소 저장) ──────────────────────────
+
+async function getOrCreateSheet() {
+  if (SHEET_ID) return SHEET_ID;
+  try {
+    // 기존 시트 검색
+    const searchRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name%3D'memo-data'+and+mimeType%3D'application%2Fvnd.google-apps.spreadsheet'+and+trashed%3Dfalse&fields=files(id,name)`,
+      { headers: { 'Authorization': `Bearer ${gAccessToken}` } }
+    );
+    const searchData = await searchRes.json();
+    if (searchData.files && searchData.files.length > 0) {
+      SHEET_ID = searchData.files[0].id;
+      localStorage.setItem('memo_sheet_id', SHEET_ID);
+      return SHEET_ID;
     }
-    localStorage.setItem('memo_data', JSON.stringify(memos));
-    loadTodayMemo();
-    showStatus('✓ 동기화 완료');
-  } else {
+    // 없으면 새로 생성
+    const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ properties: { title: 'memo-data' }, sheets: [{ properties: { title: '메모' } }] })
+    });
+    const sheet = await createRes.json();
+    SHEET_ID = sheet.spreadsheetId;
+    localStorage.setItem('memo_sheet_id', SHEET_ID);
+    // 헤더 추가
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/메모!A1:C1?valueInputOption=RAW`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: [['날짜', '메모', '업데이트시간']] })
+    });
+    return SHEET_ID;
+  } catch (e) {
+    console.error('Sheets 생성/검색 오류:', e);
+    return null;
+  }
+}
+
+async function saveToSheets(date, raw) {
+  if (!gAccessToken) return;
+  try {
+    const sheetId = await getOrCreateSheet();
+    if (!sheetId) return;
+    // 기존 데이터 가져오기
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C`, {
+      headers: { 'Authorization': `Bearer ${gAccessToken}` }
+    });
+    const data = await res.json();
+    const rows = data.values || [];
+    const rowIdx = rows.findIndex(r => r[0] === date);
+    const now = new Date().toLocaleString('ko-KR');
+    if (rowIdx >= 1) {
+      // 기존 행 업데이트
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A${rowIdx+1}:C${rowIdx+1}?valueInputOption=RAW`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: [[date, raw, now]] })
+      });
+    } else {
+      // 새 행 추가
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: [[date, raw, now]] })
+      });
+    }
+    showStatus('저장됨 ✓');
+  } catch (e) {
+    console.error('Sheets 저장 오류:', e);
+  }
+}
+
+async function syncLoadFromSheets() {
+  if (!gAccessToken) return;
+  showStatus('⟳ 동기화 중...');
+  try {
+    const sheetId = await getOrCreateSheet();
+    if (!sheetId) return;
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C`, {
+      headers: { 'Authorization': `Bearer ${gAccessToken}` }
+    });
+    const data = await res.json();
+    const rows = data.values || [];
+    const today = getTodayKey();
+    const todayRow = rows.find(r => r[0] === today);
+    if (todayRow && todayRow[1]) {
+      const idx = memos.findIndex(m => m.date === today);
+      if (idx >= 0) {
+        memos[idx].raw = todayRow[1];
+      } else {
+        memos.unshift({ date: today, raw: todayRow[1], organized: null, updatedAt: Date.now() });
+      }
+      localStorage.setItem('memo_data', JSON.stringify(memos));
+      loadTodayMemo();
+      showStatus('✓ 동기화 완료');
+    } else {
+      showStatus('');
+    }
+  } catch (e) {
+    console.error('Sheets 불러오기 오류:', e);
     showStatus('');
   }
 }
@@ -978,10 +1063,29 @@ async function saveTodayToDocs(raw, organized) {
   }
 }
 
-// 일기 최종본 저장 (자정용 - AI 정리본으로 업데이트)
+// 일기 최종본 저장 (자정용 - Docs에 AI 정리본 저장)
 async function syncToDocs(memo) {
   if (!gAccessToken) return;
   await saveTodayToDocs(memo.raw, memo.organized);
+  // Sheets의 raw도 비우기 (자정 초기화와 맞춤)
+  try {
+    const sheetId = await getOrCreateSheet();
+    if (sheetId) {
+      const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:A`, {
+        headers: { 'Authorization': `Bearer ${gAccessToken}` }
+      });
+      const data = await res.json();
+      const rows = data.values || [];
+      const rowIdx = rows.findIndex(r => r[0] === memo.date);
+      if (rowIdx >= 1) {
+        await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!B${rowIdx+1}?valueInputOption=RAW`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ values: [['[자정 저장 완료]']] })
+        });
+      }
+    }
+  } catch (e) { console.error('Sheets 자정 처리 오류:', e); }
   showStatus('✓ 일기장에 저장됨');
 }
 
@@ -1039,13 +1143,6 @@ async function autoOrganizeAndClear() {
   document.getElementById('memoInput').value = '';
   document.getElementById('todayLabel').textContent = getToday();
   document.getElementById('aiResult').classList.remove('visible');
-
-  // localStorage의 raw 데이터 제거 (재접속 시 어제 내용 재표시 방지)
-  const idx = memos.findIndex(m => m.date === key);
-  if (idx >= 0) {
-    memos[idx].raw = '';
-    localStorage.setItem('memo_data', JSON.stringify(memos));
-  }
 
   // 다음 자정 예약
   scheduleMidnight();
