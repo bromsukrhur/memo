@@ -464,7 +464,7 @@
     </div>
 
     <div class="settings-group">
-      <div class="settings-label">📔 Google Docs 일기장 연동</div>
+      <div class="settings-label">📔 Google Drive 동기화</div>
       <button class="google-btn" onclick="googleLogin()">
         <svg class="google-icon" viewBox="0 0 48 48">
           <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
@@ -474,13 +474,8 @@
         </svg>
         Google 계정으로 로그인
       </button>
-      <div class="auth-status" id="authStatus">연결되지 않음 — 로그인하면 매일 자정 일기장에 자동 저장됩니다</div>
-      <div style="margin-top:1rem">
-        <input type="text" class="settings-input" id="docIdInput" placeholder="기존 Docs 문서 ID (비우면 자동 생성)" />
-        <button class="btn btn-accent" onclick="saveDocId()" style="margin-bottom:0.5rem">문서 ID 저장</button>
-        <div class="settings-note">구글 Docs URL의 /d/ 뒤 긴 문자열이 문서 ID예요.<br>비워두면 처음 저장 시 새 문서가 자동 생성됩니다.</div>
-        <div id="docStatus" style="font-size:0.8rem;margin-top:0.5rem;color:var(--accent2)"></div>
-      </div>
+      <div class="auth-status" id="authStatus">연결되지 않음 — 로그인하면 모든 기기에서 자동 동기화됩니다</div>
+      <button class="btn" style="margin-top:1rem" onclick="syncFromDrive()">🔄 지금 동기화</button>
     </div>
 
     <div class="settings-group">
@@ -495,7 +490,7 @@
       <div style="margin-top:1rem">
         <input type="file" id="importFile" accept=".json" style="display:none" onchange="importData(event)" />
         <button class="btn btn-accent" onclick="document.getElementById('importFile').click()">📂 JSON 가져오기</button>
-        <div class="settings-note" style="margin-top:0.75rem">모바일에서 내보낸 파일을 불러옵니다. 기존 데이터와 합쳐집니다.</div>
+        <div class="settings-note" style="margin-top:0.75rem">다른 기기에서 내보낸 파일을 불러옵니다.</div>
         <div id="importStatus" style="font-size:0.8rem;margin-top:0.5rem;color:var(--accent2)"></div>
       </div>
     </div>
@@ -504,9 +499,8 @@
 
 <script>
 const CLIENT_ID = '1095156514207-d8c88k6indsb94lkpbd5amq70klcd4fp.apps.googleusercontent.com';
-let DOC_ID = localStorage.getItem('memo_doc_id') || '';
-const SCOPES = 'https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets';
-let SHEET_ID = localStorage.getItem('memo_sheet_id') || '';
+const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FILE_NAME = 'memo-data.json';
 
 let selectedDots = [];
 let isDrawing = false;
@@ -514,8 +508,9 @@ let savedPattern = localStorage.getItem('memo_pattern');
 let isSettingPattern = !savedPattern;
 let memos = JSON.parse(localStorage.getItem('memo_data') || '[]');
 let apiKey = localStorage.getItem('memo_apikey') || '';
-let gAccessToken = localStorage.getItem('memo_gtoken') || '';
+let gAccessToken = null;
 let tokenClient = null;
+let driveFileId = localStorage.getItem('memo_drive_file_id') || null;
 
 // ─── PATTERN LOCK ───────────────────────────────────────────
 function initPattern() {
@@ -633,7 +628,6 @@ function unlock() {
   document.getElementById('mainApp').style.display = 'block';
   loadTodayMemo();
   if (apiKey) document.getElementById('apiKeyInput').value = apiKey;
-  if (gAccessToken) updateAuthStatus(true);
   loadGapi();
   scheduleMidnight();
 }
@@ -688,7 +682,7 @@ function saveMemo() {
   const obj = { date: key, raw: val, organized: memos[idx]?.organized || null, updatedAt: Date.now() };
   if (idx >= 0) memos[idx] = obj; else memos.unshift(obj);
   localStorage.setItem('memo_data', JSON.stringify(memos));
-  if (gAccessToken) saveToSheets(key, val);
+  if (gAccessToken) saveToDrive();
   showStatus('저장됨 ✓');
 }
 
@@ -797,24 +791,19 @@ function importData(event) {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
       const imported = JSON.parse(e.target.result);
       if (!Array.isArray(imported)) throw new Error('올바른 형식이 아닙니다');
-      // 기존 데이터와 합치기 (날짜 기준, 중복 시 가져온 것 우선)
       const merged = [...memos];
       imported.forEach(item => {
         const idx = merged.findIndex(m => m.date === item.date);
-        if (idx >= 0) {
-          merged[idx] = item;
-        } else {
-          merged.push(item);
-        }
+        if (idx >= 0) { merged[idx] = item; } else { merged.push(item); }
       });
-      // 날짜 내림차순 정렬
       merged.sort((a, b) => b.date.localeCompare(a.date));
       memos = merged;
       localStorage.setItem('memo_data', JSON.stringify(memos));
+      if (gAccessToken) await saveToDrive();
       document.getElementById('importStatus').textContent = `✓ ${imported.length}개 메모 가져오기 완료!`;
       event.target.value = '';
     } catch (err) {
@@ -832,7 +821,7 @@ function exportData() {
   a.href = url; a.download = `memo_backup_${getTodayKey()}.json`; a.click();
 }
 
-// ─── GOOGLE SHEETS ──────────────────────────────────────────
+// ─── GOOGLE AUTH ────────────────────────────────────────────
 function loadGapi() {
   if (document.getElementById('gapiScript')) return;
   const s = document.createElement('script');
@@ -846,11 +835,11 @@ function initGsi() {
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
     scope: SCOPES,
-    callback: (resp) => {
+    callback: async (resp) => {
       if (resp.error) { console.error(resp); return; }
       gAccessToken = resp.access_token;
-      localStorage.setItem('memo_gtoken', gAccessToken);
       updateAuthStatus(true);
+      await syncFromDrive();
     }
   });
 }
@@ -863,279 +852,100 @@ function googleLogin() {
 function updateAuthStatus(ok) {
   const el = document.getElementById('authStatus');
   if (ok) {
-    el.textContent = '✓ Google 계정 연결됨 — PC/모바일 실시간 동기화 활성화';
+    el.textContent = '✓ Google 계정 연결됨 — 자동 동기화 활성화';
     el.className = 'auth-status connected';
-    if (DOC_ID) {
-      document.getElementById('docStatus').textContent = `✓ 연결된 문서 ID: ${DOC_ID.slice(0,20)}...`;
-    }
-    // Sheets에서 오늘 메모 불러오기
-    syncLoadFromSheets();
   }
 }
 
-// ─── GOOGLE SHEETS 동기화 (평소 저장) ──────────────────────────
+// ─── GOOGLE DRIVE 동기화 ─────────────────────────────────────
 
-async function getOrCreateSheet() {
-  if (SHEET_ID) return SHEET_ID;
+async function getOrCreateDriveFile() {
+  if (driveFileId) return driveFileId;
   try {
-    // 기존 시트 검색
-    const searchRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=name%3D'memo-data'+and+mimeType%3D'application%2Fvnd.google-apps.spreadsheet'+and+trashed%3Dfalse&fields=files(id,name)`,
+    // 기존 파일 검색
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=name%3D'${DRIVE_FILE_NAME}'+and+trashed%3Dfalse&fields=files(id,name)`,
       { headers: { 'Authorization': `Bearer ${gAccessToken}` } }
     );
-    const searchData = await searchRes.json();
-    if (searchData.files && searchData.files.length > 0) {
-      SHEET_ID = searchData.files[0].id;
-      localStorage.setItem('memo_sheet_id', SHEET_ID);
-      return SHEET_ID;
+    const data = await res.json();
+    if (data.files && data.files.length > 0) {
+      driveFileId = data.files[0].id;
+      localStorage.setItem('memo_drive_file_id', driveFileId);
+      return driveFileId;
     }
     // 없으면 새로 생성
-    const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+    const meta = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
+    const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ properties: { title: 'memo-data' }, sheets: [{ properties: { title: '메모' } }] })
+      body: JSON.stringify(meta)
     });
-    const sheet = await createRes.json();
-    SHEET_ID = sheet.spreadsheetId;
-    localStorage.setItem('memo_sheet_id', SHEET_ID);
-    // 헤더 추가
-    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/메모!A1:C1?valueInputOption=RAW`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: [['날짜', '메모', '업데이트시간']] })
-    });
-    return SHEET_ID;
+    const file = await createRes.json();
+    driveFileId = file.id;
+    localStorage.setItem('memo_drive_file_id', driveFileId);
+    return driveFileId;
   } catch (e) {
-    console.error('Sheets 생성/검색 오류:', e);
+    console.error('Drive 파일 생성/검색 오류:', e);
     return null;
   }
 }
 
-async function saveToSheets(date, raw) {
+async function saveToDrive() {
   if (!gAccessToken) return;
   try {
-    const sheetId = await getOrCreateSheet();
-    if (!sheetId) return;
-    // 기존 데이터 가져오기
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C`, {
-      headers: { 'Authorization': `Bearer ${gAccessToken}` }
+    const fileId = await getOrCreateDriveFile();
+    if (!fileId) return;
+    showStatus('⟳ 저장 중...');
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${gAccessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(memos)
     });
-    const data = await res.json();
-    const rows = data.values || [];
-    const rowIdx = rows.findIndex(r => r[0] === date);
-    const now = new Date().toLocaleString('ko-KR');
-    if (rowIdx >= 1) {
-      // 기존 행 업데이트
-      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A${rowIdx+1}:C${rowIdx+1}?valueInputOption=RAW`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values: [[date, raw, now]] })
-      });
-    } else {
-      // 새 행 추가
-      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values: [[date, raw, now]] })
-      });
-    }
-    showStatus('저장됨 ✓');
+    showStatus('✓ 저장됨');
   } catch (e) {
-    console.error('Sheets 저장 오류:', e);
+    console.error('Drive 저장 오류:', e);
+    showStatus('저장 오류');
   }
 }
 
-async function syncLoadFromSheets() {
+async function syncFromDrive() {
   if (!gAccessToken) return;
   showStatus('⟳ 동기화 중...');
   try {
-    const sheetId = await getOrCreateSheet();
-    if (!sheetId) return;
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:C`, {
+    const fileId = await getOrCreateDriveFile();
+    if (!fileId) return;
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
       headers: { 'Authorization': `Bearer ${gAccessToken}` }
     });
-    const data = await res.json();
-    const rows = data.values || [];
-    const today = getTodayKey();
-    const todayRow = rows.find(r => r[0] === today);
-    if (todayRow && todayRow[1]) {
-      const idx = memos.findIndex(m => m.date === today);
+    if (!res.ok) { showStatus(''); return; }
+    const cloudMemos = await res.json();
+    if (!Array.isArray(cloudMemos)) { showStatus(''); return; }
+
+    // 로컬과 클라우드 병합 (최신 updatedAt 우선)
+    const merged = [...memos];
+    cloudMemos.forEach(item => {
+      const idx = merged.findIndex(m => m.date === item.date);
       if (idx >= 0) {
-        memos[idx].raw = todayRow[1];
+        if ((item.updatedAt || 0) > (merged[idx].updatedAt || 0)) merged[idx] = item;
       } else {
-        memos.unshift({ date: today, raw: todayRow[1], organized: null, updatedAt: Date.now() });
+        merged.push(item);
       }
-      localStorage.setItem('memo_data', JSON.stringify(memos));
-      loadTodayMemo();
-      showStatus('✓ 동기화 완료');
-    } else {
-      showStatus('');
-    }
+    });
+    merged.sort((a, b) => b.date.localeCompare(a.date));
+    memos = merged;
+    localStorage.setItem('memo_data', JSON.stringify(memos));
+    loadTodayMemo();
+    showStatus('✓ 동기화 완료');
+
+    // 병합 결과를 Drive에도 반영
+    await saveToDrive();
   } catch (e) {
-    console.error('Sheets 불러오기 오류:', e);
+    console.error('Drive 불러오기 오류:', e);
     showStatus('');
   }
-}
-
-function saveDocId() {
-  const val = document.getElementById('docIdInput').value.trim();
-  if (!val) return;
-  DOC_ID = val;
-  localStorage.setItem('memo_doc_id', DOC_ID);
-  document.getElementById('docStatus').textContent = '✓ 문서 ID 저장됨';
-}
-
-// ─── GOOGLE DOCS 동기화 ─────────────────────────────────────
-
-// Drive API로 "나의 일기장" 문서 찾거나 새로 만들기
-async function getOrCreateDoc() {
-  if (DOC_ID) return DOC_ID;
-  try {
-    // 기존 문서 검색
-    const searchRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=name%3D'%F0%9F%93%93+%EB%82%98%EC%9D%98+%EC%9D%BC%EA%B8%B0%EC%9E%A5'+and+mimeType%3D'application%2Fvnd.google-apps.document'+and+trashed%3Dfalse&fields=files(id,name)`,
-      { headers: { 'Authorization': `Bearer ${gAccessToken}` } }
-    );
-    const searchData = await searchRes.json();
-    if (searchData.files && searchData.files.length > 0) {
-      DOC_ID = searchData.files[0].id;
-      localStorage.setItem('memo_doc_id', DOC_ID);
-      return DOC_ID;
-    }
-    // 없으면 새로 생성
-    const createRes = await fetch('https://docs.googleapis.com/v1/documents', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: '📓 나의 일기장' })
-    });
-    const doc = await createRes.json();
-    DOC_ID = doc.documentId;
-    localStorage.setItem('memo_doc_id', DOC_ID);
-    return DOC_ID;
-  } catch (e) {
-    console.error('Docs 생성/검색 오류:', e);
-    return null;
-  }
-}
-
-// Docs 전체 텍스트에서 날짜 섹션 파싱
-function parseDocSections(bodyContent) {
-  let fullText = '';
-  const texts = [];
-  bodyContent.forEach(el => {
-    if (el.paragraph) {
-      el.paragraph.elements.forEach(pe => {
-        if (pe.textRun) texts.push({ text: pe.textRun.content, start: pe.startIndex });
-      });
-    }
-  });
-  fullText = texts.map(t => t.text).join('');
-
-  const sections = {};
-  const datePattern = /\[MEMO:(\d{4}-\d{2}-\d{2})\]\n([\s\S]*?)\[\/MEMO\]/g;
-  let match;
-  while ((match = datePattern.exec(fullText)) !== null) {
-    sections[match[1]] = match[2].trim();
-  }
-  return { sections, fullText };
-}
-
-// 오늘 메모를 Docs에서 불러오기
-async function loadTodayFromDocs() {
-  if (!gAccessToken) return null;
-  try {
-    const docId = await getOrCreateDoc();
-    if (!docId) return null;
-    const res = await fetch(`https://docs.googleapis.com/v1/documents/${docId}`, {
-      headers: { 'Authorization': `Bearer ${gAccessToken}` }
-    });
-    const doc = await res.json();
-    const { sections } = parseDocSections(doc.body.content);
-    const today = getTodayKey();
-    return sections[today] || null;
-  } catch (e) {
-    console.error('Docs 불러오기 오류:', e);
-    return null;
-  }
-}
-
-// 오늘 메모를 Docs에 저장/업데이트
-async function saveTodayToDocs(raw, organized) {
-  if (!gAccessToken) return;
-  try {
-    const docId = await getOrCreateDoc();
-    if (!docId) return;
-
-    const res = await fetch(`https://docs.googleapis.com/v1/documents/${docId}`, {
-      headers: { 'Authorization': `Bearer ${gAccessToken}` }
-    });
-    const doc = await res.json();
-    const bodyContent = doc.body.content;
-    const endIndex = bodyContent[bodyContent.length - 1].endIndex - 1;
-
-    // 기존 오늘 섹션 찾기
-    let fullText = '';
-    bodyContent.forEach(el => {
-      if (el.paragraph) el.paragraph.elements.forEach(pe => { if (pe.textRun) fullText += pe.textRun.content; });
-    });
-
-    const today = getTodayKey();
-    const marker = `[MEMO:${today}]`;
-    const endMarker = `[/MEMO]`;
-    const sectionRegex = new RegExp(`\\[MEMO:${today}\\]\\n[\\s\\S]*?\\[/MEMO\\]`, '');
-    const content = organized || raw;
-    const newSection = `${marker}\n${content}\n${endMarker}`;
-
-    const requests = [];
-
-    if (sectionRegex.test(fullText)) {
-      // 기존 섹션 교체 - 위치 계산
-      const matchIdx = fullText.search(sectionRegex);
-      const matchLen = fullText.match(sectionRegex)[0].length;
-      requests.push({ deleteContentRange: { range: { startIndex: matchIdx + 1, endIndex: matchIdx + 1 + matchLen } } });
-      requests.push({ insertText: { location: { index: matchIdx + 1 }, text: newSection } });
-    } else {
-      // 새 섹션 추가
-      const dateObj = new Date(today);
-      const formatted = dateObj.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
-      const entry = `\n\n📅 ${formatted}\n${'─'.repeat(30)}\n${newSection}\n`;
-      requests.push({ insertText: { location: { index: endIndex }, text: entry } });
-    }
-
-    await fetch(`https://docs.googleapis.com/v1/documents/${docId}:batchUpdate`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests })
-    });
-  } catch (e) {
-    console.error('Docs 저장 오류:', e);
-  }
-}
-
-// 일기 최종본 저장 (자정용 - Docs에 AI 정리본 저장)
-async function syncToDocs(memo) {
-  if (!gAccessToken) return;
-  await saveTodayToDocs(memo.raw, memo.organized);
-  // Sheets의 raw도 비우기 (자정 초기화와 맞춤)
-  try {
-    const sheetId = await getOrCreateSheet();
-    if (sheetId) {
-      const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!A:A`, {
-        headers: { 'Authorization': `Bearer ${gAccessToken}` }
-      });
-      const data = await res.json();
-      const rows = data.values || [];
-      const rowIdx = rows.findIndex(r => r[0] === memo.date);
-      if (rowIdx >= 1) {
-        await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/메모!B${rowIdx+1}?valueInputOption=RAW`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${gAccessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ values: [['[자정 저장 완료]']] })
-        });
-      }
-    }
-  } catch (e) { console.error('Sheets 자정 처리 오류:', e); }
-  showStatus('✓ 일기장에 저장됨');
 }
 
 // ─── 자정 자동화 ─────────────────────────────────────────────
@@ -1152,7 +962,6 @@ async function autoOrganizeAndClear() {
   const memo = memos.find(m => m.date === key);
 
   if (memo && memo.raw && memo.raw.trim()) {
-    // AI 정리가 아직 안 된 경우에만 실행
     if (!memo.organized && apiKey) {
       try {
         const aiEndpoint = localStorage.getItem('memo_ai_endpoint') || 'https://aiprimetech.io/v1';
@@ -1179,23 +988,19 @@ async function autoOrganizeAndClear() {
           const idx = memos.findIndex(m => m.date === key);
           if (idx >= 0) memos[idx] = memo;
           localStorage.setItem('memo_data', JSON.stringify(memos));
-          if (gAccessToken) syncToDocs(memo);
+          if (gAccessToken) await saveToDrive();
         }
       } catch (e) {
         console.error('자정 AI 정리 오류:', e);
       }
-    } else if (memo.organized && gAccessToken) {
-      // 이미 정리된 경우 시트에만 동기화
-      syncToDocs(memo);
+    } else if (gAccessToken) {
+      await saveToDrive();
     }
   }
 
-  // 메모 textarea 초기화 (새 날짜용)
   document.getElementById('memoInput').value = '';
   document.getElementById('todayLabel').textContent = getToday();
   document.getElementById('aiResult').classList.remove('visible');
-
-  // 다음 자정 예약
   scheduleMidnight();
 }
 
