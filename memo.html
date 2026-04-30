@@ -492,6 +492,12 @@
       <div class="settings-label">💾 데이터 백업</div>
       <button class="btn" onclick="exportData()">JSON으로 내보내기</button>
       <div class="settings-note" style="margin-top:0.75rem">메모 데이터를 파일로 저장합니다.</div>
+      <div style="margin-top:1rem">
+        <input type="file" id="importFile" accept=".json" style="display:none" onchange="importData(event)" />
+        <button class="btn btn-accent" onclick="document.getElementById('importFile').click()">📂 JSON 가져오기</button>
+        <div class="settings-note" style="margin-top:0.75rem">모바일에서 내보낸 파일을 불러옵니다. 기존 데이터와 합쳐집니다.</div>
+        <div id="importStatus" style="font-size:0.8rem;margin-top:0.5rem;color:var(--accent2)"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -785,6 +791,38 @@ function saveApiKey() {
   localStorage.setItem('memo_apikey', key);
   document.getElementById('apiStatus').textContent = '✓ API 키 저장됨';
   document.getElementById('apiStatus').className = 'api-status ok';
+}
+
+function importData(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (!Array.isArray(imported)) throw new Error('올바른 형식이 아닙니다');
+      // 기존 데이터와 합치기 (날짜 기준, 중복 시 가져온 것 우선)
+      const merged = [...memos];
+      imported.forEach(item => {
+        const idx = merged.findIndex(m => m.date === item.date);
+        if (idx >= 0) {
+          merged[idx] = item;
+        } else {
+          merged.push(item);
+        }
+      });
+      // 날짜 내림차순 정렬
+      merged.sort((a, b) => b.date.localeCompare(a.date));
+      memos = merged;
+      localStorage.setItem('memo_data', JSON.stringify(memos));
+      document.getElementById('importStatus').textContent = `✓ ${imported.length}개 메모 가져오기 완료!`;
+      event.target.value = '';
+    } catch (err) {
+      document.getElementById('importStatus').textContent = '오류: ' + err.message;
+      document.getElementById('importStatus').style.color = 'var(--danger)';
+    }
+  };
+  reader.readAsText(file);
 }
 
 function exportData() {
