@@ -19,6 +19,74 @@
     --danger: #c06060;
   }
 
+  /* DARK (기본) */
+  body[data-theme="dark"] {
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --surface2: #222;
+    --border: #333;
+    --text: #e8e8e0;
+    --text-muted: #888;
+    --accent: #c8a96e;
+    --accent2: #8fb8a0;
+    --danger: #c06060;
+  }
+
+  /* LIGHT */
+  body[data-theme="light"] {
+    --bg: #fafaf7;
+    --surface: #ffffff;
+    --surface2: #f1eee8;
+    --border: #d8d4ca;
+    --text: #2a2a26;
+    --text-muted: #7a766e;
+    --accent: #8b6f3a;
+    --accent2: #4a8062;
+    --danger: #b04848;
+  }
+
+  /* SEPIA (종이) */
+  body[data-theme="sepia"] {
+    --bg: #f4ecd8;
+    --surface: #faf3e0;
+    --surface2: #ede4cd;
+    --border: #d4c5a0;
+    --text: #3a2f20;
+    --text-muted: #8a7a5e;
+    --accent: #a0763e;
+    --accent2: #5e8a6e;
+    --danger: #a55050;
+  }
+
+  /* 테마 전환 */
+  .theme-switcher {
+    display: flex;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px;
+  }
+
+  .theme-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: 'Noto Sans KR', sans-serif;
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    padding: 5px 10px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.2s;
+  }
+
+  .theme-btn:hover { color: var(--text); }
+
+  .theme-btn.active {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
@@ -391,7 +459,9 @@
 
   @media (max-width: 600px) {
     .tab-content { padding: 1.25rem; }
-    .app-header { padding: 1rem 1.25rem; }
+    .app-header { padding: 1rem 1.25rem; flex-wrap: wrap; gap: 0.75rem; }
+    .header-actions { flex-wrap: wrap; }
+    .theme-btn { font-size: 0.68rem; padding: 4px 8px; }
     .memo-textarea { min-height: 200px; }
   }
 </style>
@@ -421,6 +491,11 @@
   <div class="app-header">
     <div class="app-title">📓 개인 메모장</div>
     <div class="header-actions">
+      <div class="theme-switcher">
+        <button class="theme-btn" data-theme-value="dark" onclick="setTheme('dark')">다크</button>
+        <button class="theme-btn" data-theme-value="light" onclick="setTheme('light')">라이트</button>
+        <button class="theme-btn" data-theme-value="sepia" onclick="setTheme('sepia')">종이</button>
+      </div>
       <button class="btn" style="font-size:0.75rem;padding:6px 14px" onclick="lockApp()">잠금</button>
     </div>
   </div>
@@ -1012,6 +1087,25 @@ function scheduleMidnight() {
 }
 
 // ─── INIT ───────────────────────────────────────────────────
+// 저장된 테마 적용 (없으면 dark)
+const savedTheme = localStorage.getItem('memo_theme') || 'dark';
+document.body.setAttribute('data-theme', savedTheme);
+
+function setTheme(theme) {
+  document.body.setAttribute('data-theme', theme);
+  localStorage.setItem('memo_theme', theme);
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themeValue === theme);
+  });
+}
+
+// 페이지 로드 시 활성 버튼 표시
+window.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themeValue === savedTheme);
+  });
+});
+
 initPattern();
 scheduleMidnight();
 </script>
