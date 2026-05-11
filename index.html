@@ -533,7 +533,10 @@
     <div class="settings-group">
       <div class="settings-label">🔑 AI API 키 (aiprimetech.io)</div>
       <input type="password" class="settings-input" id="apiKeyInput" placeholder="sk-ant-..." />
-      <button class="btn btn-accent" onclick="saveApiKey()" style="margin-bottom:0.75rem">저장</button>
+      <div style="display:flex;gap:8px;margin-bottom:0.75rem">
+        <button class="btn btn-accent" onclick="saveApiKey()">저장</button>
+        <button class="btn" onclick="clearApiKey()" style="background:var(--danger,#dc2626);color:#fff;border-color:transparent">초기화</button>
+      </div>
       <div class="settings-note">AI 정리 버튼을 누를 때 사용됩니다. 브라우저에만 저장됩니다.</div>
       <div class="api-status" id="apiStatus"></div>
     </div>
@@ -853,6 +856,15 @@ function switchTab(tab) {
 }
 
 // ─── SETTINGS ───────────────────────────────────────────────
+function clearApiKey() {
+  if (!confirm('API 키를 초기화할까요?')) return;
+  apiKey = '';
+  localStorage.removeItem('memo_apikey');
+  document.getElementById('apiKeyInput').value = '';
+  document.getElementById('apiStatus').textContent = 'API 키가 초기화됐어요';
+  document.getElementById('apiStatus').className = 'api-status';
+}
+
 function saveApiKey() {
   const key = document.getElementById('apiKeyInput').value.trim();
   if (!key) return;
